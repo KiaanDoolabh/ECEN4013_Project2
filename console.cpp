@@ -12,18 +12,23 @@ void Console::init(uint bt_baud) {
 }
 
 void Console::vprint(Route r, const char* fmt, va_list args) {
-    char buf[256];
+    char buf[512];  // big enough for a full CSV header or data row
     vsnprintf(buf, sizeof(buf), fmt, args);
-    // "USB only" with nobody on USB (e.g. running on battery) would go nowhere, so use Bluetooth
-    if (r == Route::Usb && !stdio_usb_connected()) r = Route::Bluetooth;
     if (r != Route::Bluetooth) fputs(buf, stdout);  // stdio only goes to USB
     if (r != Route::Usb) uart_puts(uart_, buf);
 }
 
 void Console::print(const char* fmt, ...) {
+    Route r = route_;
+    // "USB only" with nobody on USB (e.g. running on battery) would go nowhere, so use Bluetooth
+    if (r == Route::Usb && !stdio_usb_connected()) r = Route::Bluetooth;
+    if (streaming_) {
+        if (r == Route::Both) r = stream_link_ == Route::Usb ? Route::Bluetooth : Route::Usb;
+        else if (r == stream_link_) return;
+    }
     va_list args;
     va_start(args, fmt);
-    vprint(route_, fmt, args);
+    vprint(r, fmt, args);
     va_end(args);
 }
 
@@ -34,10 +39,24 @@ void Console::print_all(const char* fmt, ...) {
     va_end(args);
 }
 
-int Console::read_char() {
+void Console::print_data(const char* fmt, ...) {
+    if (!streaming_) return;
+    va_list args;
+    va_start(args, fmt);
+    vprint(stream_link_, fmt, args);
+    va_end(args);
+}
+
+int Console::read_char(Route* from) {
     int c = getchar_timeout_us(0);
-    if (c != PICO_ERROR_TIMEOUT) return c;
-    if (uart_is_readable(uart_)) return uart_getc(uart_);
+    if (c != PICO_ERROR_TIMEOUT) {
+        if (from) *from = Route::Usb;
+        return c;
+    }
+    if (uart_is_readable(uart_)) {
+        if (from) *from = Route::Bluetooth;
+        return uart_getc(uart_);
+    }
     return -1;
 }
 

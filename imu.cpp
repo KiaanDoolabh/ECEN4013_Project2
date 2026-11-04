@@ -13,6 +13,7 @@ constexpr uint8_t CHANNEL_WAKE_REPORTS = 4;
 // SH-2 report IDs
 constexpr uint8_t REPORT_ACCELEROMETER = 0x01;
 constexpr uint8_t REPORT_GYROSCOPE = 0x02;
+constexpr uint8_t REPORT_MAGNETIC_FIELD = 0x03;
 constexpr uint8_t REPORT_ROTATION_VECTOR = 0x05;
 constexpr uint8_t REPORT_TIMESTAMP_REBASE = 0xFA;
 constexpr uint8_t REPORT_BASE_TIMESTAMP = 0xFB;
@@ -125,6 +126,7 @@ void Bno085::enable_reports() {
     enable_report(REPORT_ROTATION_VECTOR, REPORT_INTERVAL_US);
     enable_report(REPORT_ACCELEROMETER, REPORT_INTERVAL_US);
     enable_report(REPORT_GYROSCOPE, REPORT_INTERVAL_US);
+    enable_report(REPORT_MAGNETIC_FIELD, REPORT_INTERVAL_US);
 }
 
 void Bno085::handle_packet(uint8_t channel, const uint8_t* p, size_t len) {
@@ -149,6 +151,10 @@ void Bno085::handle_packet(uint8_t channel, const uint8_t* p, size_t len) {
                 break;
             case REPORT_GYROSCOPE:
                 for (int a = 0; a < 3; ++a) data_.gyro[a] = fixed(r + 4 + 2 * a, 9);
+                new_data_ = true;
+                break;
+            case REPORT_MAGNETIC_FIELD:
+                for (int a = 0; a < 3; ++a) data_.mag[a] = fixed(r + 4 + 2 * a, 4);
                 new_data_ = true;
                 break;
             case REPORT_ROTATION_VECTOR: {

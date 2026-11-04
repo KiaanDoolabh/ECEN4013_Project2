@@ -13,6 +13,7 @@ struct ImuData {
     uint8_t accuracy = 0;                   // 0 unreliable, 1 low, 2 medium, 3 high
     float accel[3] = {};                    // m/s^2 on x, y, z (includes gravity)
     float gyro[3] = {};                     // rad/s around x, y, z
+    float mag[3] = {};                      // magnetic field in uT on x, y, z (calibrated)
 };
 
 class Bno085 {

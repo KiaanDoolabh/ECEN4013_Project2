@@ -28,10 +28,14 @@
 
 constexpr uint32_t LOG_INTERVAL_MS = 250;  // 4 rows a second
 
+// GUI data stream ("$DATA,<csv row>" lines). Bluetooth runs at 9600 baud, so it gets fewer.
+constexpr uint32_t STREAM_INTERVAL_USB_MS = 100;
+constexpr uint32_t STREAM_INTERVAL_BT_MS = 500;
+
 const char* const CSV_HEADER =
     "uptime_ms,utc_date,utc_time,gps_fix,latitude,longitude,altitude_m,satellites,sats_in_view,hdop,"
     "speed_knots,course_deg,yaw_deg,pitch_deg,roll_deg,heading_accuracy,"
-    "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,temp_c\n";
+    "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,temp_c\n";
 
 // One CSV row matching CSV_HEADER. Pass nullptr for a sensor that isn't connected;
 // its columns are left empty, as are the position columns while the GPS has no fix.
@@ -56,11 +60,11 @@ void csv_row(char* out, size_t size, uint32_t uptime_ms, const GpsFix* gps,
     }
 
     if (imu) {
-        add("%.2f,%.2f,%.2f,%u,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,", imu->yaw, imu->pitch, imu->roll,
-            imu->accuracy, imu->accel[0], imu->accel[1], imu->accel[2],
-            imu->gyro[0], imu->gyro[1], imu->gyro[2]);
+        add("%.2f,%.2f,%.2f,%u,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,", imu->yaw, imu->pitch,
+            imu->roll, imu->accuracy, imu->accel[0], imu->accel[1], imu->accel[2],
+            imu->gyro[0], imu->gyro[1], imu->gyro[2], imu->mag[0], imu->mag[1], imu->mag[2]);
     } else {
-        add(",,,,,,,,,,");
+        add(",,,,,,,,,,,,,");
     }
     add("%.1f\n", temp_c);
 }
@@ -244,6 +248,7 @@ int main() {
         else console.print_all("SD card  : NO CARD INSERTED - data will not be saved\n");
         console.print_all("Output   : %s\n", Console::route_name(console.route()));
         console.print_all("Type u = USB only, b = Bluetooth only, a = both, s = show this again\n");
+        console.print_all("     g = start GUI data stream on this link, x = stop it\n");
         console.print_all("Press BOOTSEL to change LED pattern\n\n");
     };
     print_info();
@@ -265,6 +270,7 @@ int main() {
     absolute_time_t step_end = get_absolute_time();
     absolute_time_t next_report = get_absolute_time();
     absolute_time_t next_log = get_absolute_time();
+    absolute_time_t next_stream = get_absolute_time();
 
     while (true) {
         bool pressed = bootsel_pressed();
@@ -276,13 +282,21 @@ int main() {
         }
         was_pressed = pressed;
 
-        for (int c; (c = console.read_char()) >= 0;) {
+        Console::Route from;
+        for (int c; (c = console.read_char(&from)) >= 0;) {
             Console::Route route;
             switch (tolower(c)) {
                 case 'u': route = Console::Route::Usb; break;
                 case 'b': route = Console::Route::Bluetooth; break;
                 case 'a': route = Console::Route::Both; break;
                 case 's': print_info(); continue;
+                case 'g':
+                    // The GUI asks for the stream; send the column names first so it can map the values
+                    console.start_stream(from);
+                    console.print_data("$HEADER,%s", CSV_HEADER);
+                    next_stream = get_absolute_time();
+                    continue;
+                case 'x': console.stop_stream(); continue;
                 default:  continue;  // ignore newlines and anything else
             }
             console.set_route(route);
@@ -373,6 +387,21 @@ int main() {
             logger.write(row);
             next_log = delayed_by_ms(next_log, LOG_INTERVAL_MS);
             if (time_reached(next_log)) next_log = make_timeout_time_ms(LOG_INTERVAL_MS);  // fell behind
+        }
+
+        // Stop streaming to USB once the GUI has closed the port
+        if (console.streaming() && console.stream_link() == Console::Route::Usb && !stdio_usb_connected())
+            console.stop_stream();
+
+        if (console.streaming() && time_reached(next_stream)) {
+            char row[320];
+            csv_row(row, sizeof(row), to_ms_since_boot(get_absolute_time()),
+                    gps_found ? &gps.fix() : nullptr, imu_found ? &imu.data() : nullptr,
+                    chip_temp_c());
+            console.print_data("$DATA,%s", row);
+            next_stream = make_timeout_time_ms(console.stream_link() == Console::Route::Usb
+                                                   ? STREAM_INTERVAL_USB_MS
+                                                   : STREAM_INTERVAL_BT_MS);
         }
 
         sleep_ms(20);  // also debounces the button
