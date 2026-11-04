@@ -29,6 +29,9 @@ program can use a COM port at a time.
   Press **Start Display**.
 - **Display:** one live value per field for GPS (latitude, longitude, elevation)
   and IMU (angular velocity, acceleration and magnetic field on X/Y/Z).
+- **SD card:** the badge in the top bar shows whether a card is in and, while
+  recording, the file name and size. **Start Recording** / **Stop Recording**
+  turn saving to the card on and off.
 - **End Display** goes back to the main menu.
 - **Quit**, **File > Quit**, **Ctrl+Q** or the window's X close the app at any time.
 - If the port can't be opened, or no data arrives within 4 seconds, it shows why
@@ -43,9 +46,25 @@ streams one reading per line (10 per second on USB, 2 per second on Bluetooth):
 ```
 $HEADER,uptime_ms,utc_date,utc_time,gps_fix,latitude,...
 $DATA,123456,2026-11-03,14:22:05,1,36.1234567,...
+$SD,recording,12700,LOG004.CSV
 ```
 
-The columns are the same as the SD card CSV files. The GUI sends `x` when it
+The `$DATA` columns are the same as the SD card CSV files. `$SD` gives the SD
+card state, the current file's size in bytes, and the file name or error
+message. It's sent when the stream starts, whenever the card or recording
+changes and once a second, and is shown as the colored badge on the display:
+
+| State | Badge |
+|---|---|
+| `recording` | green, file name and size |
+| `starting` | orange, opening a new file |
+| `waiting_card` | red, recording is on but there's no card |
+| `error` | red, recording is on but the card can't be used |
+| `ready` | blue, card in, not recording |
+| `no_card` | grey, no card, not recording |
+
+**Start Recording** / **Stop Recording** send `r` / `t`. Each recording goes in
+a new `LOGnnn.CSV`; stopping closes the file so the card is safe to remove. The GUI sends `x` when it
 disconnects. Other lines (like `>> SD card: logging to LOG004.CSV`) are shown
 in the status line.
 

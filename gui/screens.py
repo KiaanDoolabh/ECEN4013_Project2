@@ -7,6 +7,18 @@ from serial_link import list_ports
 
 ACCURACY_NAMES = {"0": "Unreliable", "1": "Low", "2": "Medium", "3": "High"}
 
+# SD states where recording is switched on (the button offers Stop)
+RECORDING_STATES = {"recording", "starting", "waiting_card", "error"}
+
+
+def format_size(size):
+    """12345 -> '12.1 KB'."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
 
 def format_number(text, decimals):
     """'12.3456' -> '12.35'; blank or unparseable -> an em dash."""
@@ -95,6 +107,7 @@ class MainMenu(QWidget):
 class DisplayScreen(QWidget):
     end_requested = Signal()
     quit_requested = Signal()
+    record_requested = Signal(bool)   # True = start recording, False = stop
 
     # (label, CSV column, unit, decimals)
     GPS_FIELDS = [
@@ -116,13 +129,23 @@ class DisplayScreen(QWidget):
         # Top bar
         self.connection = QLabel()
         self.connection.setObjectName("connection")
+        self.sd = QLabel()
+        self.sd.setObjectName("sd")
+        self.record = QPushButton("Start Recording")
+        self.record.setObjectName("record")
+        self.record.clicked.connect(
+            lambda: self.record_requested.emit(self.record.property("action") == "start"))
         end = QPushButton("End Display")
         end.setObjectName("primary")
         end.clicked.connect(self.end_requested)
         quit_button = QPushButton("Quit")
         quit_button.clicked.connect(self.quit_requested)
         top = QHBoxLayout()
-        top.addWidget(self.connection, 1)
+        top.addWidget(self.connection)
+        top.addSpacing(16)
+        top.addWidget(self.sd)
+        top.addWidget(self.record)
+        top.addStretch(1)
         top.addWidget(end)
         top.addWidget(quit_button)
 
@@ -217,6 +240,7 @@ class DisplayScreen(QWidget):
 
     def reset(self, port):
         self.connection.setText(f"Connected to {port}")
+        self.update_sd({"state": "unknown", "size": 0, "detail": ""})
         self.status.setText("Waiting for data...")
         for label, _ in self.values.values():
             label.setText("—")
@@ -234,6 +258,30 @@ class DisplayScreen(QWidget):
         self.utc.setText(f"{date} {time}".strip() or "—")
 
         self.accuracy.setText(ACCURACY_NAMES.get(row.get("heading_accuracy", ""), "—"))
+
+    def update_sd(self, sd):
+        """Shows the SD card state from a $SD line as a colored badge, and sets the record button."""
+        state, detail = sd["state"], sd["detail"]
+        text = {
+            "recording": f"● Recording to {detail} – {format_size(sd['size'])}",
+            "starting": "SD card: opening a new file...",
+            "waiting_card": "Recording paused – INSERT SD CARD",
+            "error": f"SD card error – {detail or 'not recording'}",
+            "ready": "SD card ready – not recording",
+            "no_card": "No SD card",
+        }.get(state, "SD card: waiting for status...")
+        self.sd.setText(text)
+        self.sd.setProperty("state", state)
+        self.sd.style().unpolish(self.sd)
+        self.sd.style().polish(self.sd)
+
+        recording = state in RECORDING_STATES
+        self.record.setText("Stop Recording" if recording else "Start Recording")
+        self.record.setProperty("action", "stop" if recording else "start")
+        self.record.setEnabled(recording or state == "ready")
+        self.record.setToolTip("" if recording or state == "ready" else "Insert an SD card to record")
+        self.record.style().unpolish(self.record)
+        self.record.style().polish(self.record)
 
     def set_status(self, text, warning=False):
         self.status.setText(text)

@@ -5,8 +5,9 @@
 //  - Reads an Adafruit PA1010D GPS and BNO085 IMU, both on I2C0 (SDA = GP4, SCL = GP5)
 //  - Output goes over USB, HC-06 Bluetooth on UART0 (GP0/GP1), or both; type u / b / a to pick,
 //    s to reprint the startup info. With no USB monitor connected it all goes over Bluetooth.
-//  - Logs everything to a new CSV file on a micro SD card (SPI0, GP16-19, DET on GP22);
-//    the LED switches to a triple-flash warning whenever nothing is being logged
+//  - Records everything to a new CSV file on a micro SD card (SPI0, GP16-19, DET on GP22)
+//    while recording is switched on (r / t, or the GUI's button). LED: slow blink = standby,
+//    chosen pattern = recording, triple flash = recording is on but can't write (no card / error)
 #include <cstdio>
 #include <cctype>
 #include <cstring>
@@ -165,6 +166,31 @@ Pattern morse(const char* text, uint32_t unit_ms = 150) {
     return p;
 }
 
+// "12.3 KB" style sizes for people to read
+void format_size(uint64_t bytes, char* out, size_t size) {
+    if (bytes < 1024) snprintf(out, size, "%llu B", (unsigned long long)bytes);
+    else if (bytes < 1024 * 1024) snprintf(out, size, "%.1f KB", bytes / 1024.0);
+    else snprintf(out, size, "%.1f MB", bytes / (1024.0 * 1024.0));
+}
+
+// One-line SD card state for the serial status and startup info
+void sd_summary(SdLogger& logger, char* out, size_t size) {
+    char file_size[16];
+    if (logger.logging()) {
+        format_size(logger.size(), file_size, sizeof(file_size));
+        snprintf(out, size, "recording to %s (%s)", logger.filename(), file_size);
+    } else if (logger.recording() && !logger.card_present()) {
+        snprintf(out, size, "recording on, INSERT CARD");
+    } else if (logger.recording() && logger.failed()) {
+        snprintf(out, size, "recording on, can't write (%s)", logger.error());
+    } else if (logger.recording()) {
+        snprintf(out, size, "recording on, opening file...");
+    } else {
+        snprintf(out, size, logger.card_present() ? "card ready, not recording (type r)"
+                                                  : "no card, not recording");
+    }
+}
+
 // True when the USB cable is supplying power (VBUS present), false on external power
 bool usb_power_present() {
 #if defined(PICO_VBUS_PIN)
@@ -243,15 +269,38 @@ int main() {
                                                        : "NOT FOUND - check wiring (SDA=GP4, SCL=GP5, 3V3, GND)");
         if (imu_found) console.print_all("IMU      : BNO085 found at 0x%02X\n", imu.address());
         else console.print_all("IMU      : NOT FOUND - check wiring (SDA=GP4, SCL=GP5, 3V3, GND)\n");
-        if (logger.logging()) console.print_all("SD card  : logging to %s\n", logger.filename());
-        else if (logger.card_present()) console.print_all("SD card  : card inserted, starting log\n");
-        else console.print_all("SD card  : NO CARD INSERTED - data will not be saved\n");
+        char sd_text[64];
+        sd_summary(logger, sd_text, sizeof(sd_text));
+        console.print_all("SD card  : %s\n", sd_text);
         console.print_all("Output   : %s\n", Console::route_name(console.route()));
         console.print_all("Type u = USB only, b = Bluetooth only, a = both, s = show this again\n");
+        console.print_all("     r = start recording to SD, t = stop recording\n");
         console.print_all("     g = start GUI data stream on this link, x = stop it\n");
         console.print_all("Press BOOTSEL to change LED pattern\n\n");
     };
     print_info();
+
+    // SD card status for the GUI: "$SD,<state>,<file size in bytes>,<file name or error message>"
+    //   recording     writing to a file
+    //   starting      recording is on and a file is being opened
+    //   waiting_card  recording is on but there's no card
+    //   error         recording is on but the card can't be used
+    //   ready         card is in, not recording
+    //   no_card       no card, not recording
+    // The message goes last since it may contain commas.
+    auto send_sd_status = [&]() {
+        bool card = logger.card_present();
+        if (logger.logging())
+            console.print_data("$SD,recording,%llu,%s\n", (unsigned long long)logger.size(), logger.filename());
+        else if (logger.recording() && !card)
+            console.print_data("$SD,waiting_card,0,\n");
+        else if (logger.recording() && logger.failed())
+            console.print_data("$SD,error,0,%s\n", logger.error());
+        else if (logger.recording())
+            console.print_data("$SD,starting,0,\n");
+        else
+            console.print_data(card ? "$SD,ready,0,\n" : "$SD,no_card,0,\n");
+    };
 
     const Mode modes[] = {
         {"Heartbeat",      {{true, 80}, {false, 120}, {true, 80}, {false, 720}}},
@@ -260,10 +309,11 @@ int main() {
     };
     const size_t mode_count = sizeof(modes) / sizeof(modes[0]);
 
-    // Overrides the chosen pattern whenever nothing is being saved: three quick flashes, then a pause
-    const Pattern not_logging = {{true, 50}, {false, 100}, {true, 50}, {false, 100},
-                                 {true, 50}, {false, 1000}};
-    bool showing_not_logging = false;
+    // The chosen pattern only plays while recording. Otherwise:
+    const Pattern standby = {{true, 50}, {false, 1950}};  // not recording: short blink every 2 s
+    const Pattern cant_record = {{true, 50}, {false, 100}, {true, 50}, {false, 100},
+                                 {true, 50}, {false, 1000}};  // recording on but nothing being saved
+    const Pattern* showing = nullptr;
 
     size_t mode = 0, step = 0;
     bool was_pressed = false;
@@ -271,6 +321,7 @@ int main() {
     absolute_time_t next_report = get_absolute_time();
     absolute_time_t next_log = get_absolute_time();
     absolute_time_t next_stream = get_absolute_time();
+    absolute_time_t next_sd_status = get_absolute_time();
 
     while (true) {
         bool pressed = bootsel_pressed();
@@ -294,23 +345,42 @@ int main() {
                     // The GUI asks for the stream; send the column names first so it can map the values
                     console.start_stream(from);
                     console.print_data("$HEADER,%s", CSV_HEADER);
+                    send_sd_status();
                     next_stream = get_absolute_time();
+                    next_sd_status = make_timeout_time_ms(1000);
                     continue;
                 case 'x': console.stop_stream(); continue;
+                case 'r':
+                    if (!logger.recording()) {
+                        logger.start_recording();
+                        console.print_all(">> Recording started\n");
+                        send_sd_status();
+                    }
+                    continue;
+                case 't':
+                    if (logger.recording()) {
+                        logger.stop_recording();
+                        console.print_all(">> Recording stopped, file saved\n");
+                        send_sd_status();
+                    }
+                    continue;
                 default:  continue;  // ignore newlines and anything else
             }
             console.set_route(route);
             console.print_all(">> Output: %s\n", Console::route_name(route));
         }
 
-        if (showing_not_logging != !logger.logging()) {
-            showing_not_logging = !logger.logging();
+        const Pattern* wanted = !logger.recording() ? &standby
+                              : logger.logging()    ? &modes[mode].pattern
+                                                    : &cant_record;
+        if (showing != wanted) {
+            showing = wanted;
             step = 0;  // the patterns are different lengths, so start the new one from the top
             step_end = get_absolute_time();
         }
 
         if (time_reached(step_end)) {
-            const Pattern& pattern = showing_not_logging ? not_logging : modes[mode].pattern;
+            const Pattern& pattern = *showing;
             led.set(pattern[step].on);
             step_end = make_timeout_time_ms(pattern[step].ms);
             step = (step + 1) % pattern.size();
@@ -318,12 +388,8 @@ int main() {
 
         if (time_reached(next_report)) {
             uint32_t uptime_s = to_ms_since_boot(get_absolute_time()) / 1000;
-            char sd_status[48];
-            if (logger.logging())
-                snprintf(sd_status, sizeof(sd_status), "%s (%lu rows)", logger.filename(),
-                         (unsigned long)logger.rows());
-            else
-                snprintf(sd_status, sizeof(sd_status), "not logging");
+            char sd_status[64];
+            sd_summary(logger, sd_status, sizeof(sd_status));
             console.print("[%4lus] temp %.1f C | mode %s | SD %s\n",
                           (unsigned long)uptime_s, chip_temp_c(), modes[mode].name, sd_status);
 
@@ -365,18 +431,24 @@ int main() {
             aon_timer_start(&ts);
         }
 
-        switch (logger.update()) {
+        SdLogger::Event sd_event = logger.update();
+        switch (sd_event) {
             case SdLogger::Event::Started:
                 console.print_all(">> SD card: logging to %s\n", logger.filename());
                 break;
             case SdLogger::Event::Removed:
-                console.print_all(">> SD card: removed, stopped logging\n");
+                console.print_all(">> SD card: removed - insert a card to keep recording\n");
                 break;
             case SdLogger::Event::Failed:
                 console.print_all(">> SD card: can't start logging (%s)\n", logger.error());
                 break;
             default:
                 break;
+        }
+        // Tell the GUI straight away when the card changes, and once a second otherwise
+        if (console.streaming() && (sd_event != SdLogger::Event::None || time_reached(next_sd_status))) {
+            send_sd_status();
+            next_sd_status = make_timeout_time_ms(1000);
         }
 
         if (logger.logging() && time_reached(next_log)) {

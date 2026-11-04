@@ -3,9 +3,13 @@
 Sending 'g' asks the firmware for its GUI data stream:
     $HEADER,uptime_ms,utc_date,...      column names, sent once when the stream starts
     $DATA,123456,2026-11-03,...         one reading per line, same columns as the SD card CSV
+    $SD,recording,12345,LOG004.CSV      SD card state, file size in bytes, and the file name or
+                                        error message. States: recording, starting, waiting_card,
+                                        error, ready, no_card
 Any other line (">> SD card: ...", status text) is passed along as a message.
-Sending 'x' stops the stream.
+Sending 'x' stops the stream; 'r' / 't' start and stop recording to the SD card.
 """
+import queue
 import time
 
 import serial
@@ -29,7 +33,7 @@ def list_ports():
 
 
 class StreamParser:
-    """Turns raw bytes from the Pico into ("header" | "data" | "message", payload) events.
+    """Turns raw bytes from the Pico into ("header" | "data" | "sd" | "message", payload) events.
 
     Kept separate from the serial port so it can be tested without hardware.
     """
@@ -59,6 +63,12 @@ class StreamParser:
             if len(values) != len(self.columns):
                 return ("message", f"Skipped a malformed data line ({len(values)} fields)")
             return ("data", dict(zip(self.columns, values)))
+        if line.startswith("$SD,"):
+            parts = line[len("$SD,"):].split(",", 2)  # the last field may contain commas
+            if len(parts) == 3:
+                state, size, detail = parts
+                return ("sd", {"state": state, "size": int(size) if size.isdigit() else 0,
+                               "detail": detail})
         return ("message", line)
 
 
@@ -67,6 +77,7 @@ class SerialReader(QThread):
 
     header_received = Signal(list)
     data_received = Signal(dict)      # column name -> value string ("" if not available)
+    sd_status_received = Signal(dict) # {"state": ..., "size": bytes, "detail": file name or error}
     message_received = Signal(str)
     failed = Signal(str)              # couldn't open the port, or the device went away
 
@@ -74,6 +85,11 @@ class SerialReader(QThread):
         super().__init__(parent)
         self.port = port
         self.baud = baud  # ignored for USB; 9600 matters for some Bluetooth adapters
+        self._outgoing = queue.Queue()  # commands from the GUI thread, written by this thread
+
+    def send(self, command):
+        """Queues a command (e.g. b"r") to be sent to the Pico."""
+        self._outgoing.put(command)
 
     def run(self):
         try:
@@ -89,6 +105,8 @@ class SerialReader(QThread):
             link.reset_input_buffer()
             link.write(b"g")
             while not self.isInterruptionRequested():
+                while not self._outgoing.empty():
+                    link.write(self._outgoing.get_nowait())
                 chunk = link.read(link.in_waiting or 1)
                 if not chunk:
                     continue
@@ -97,6 +115,8 @@ class SerialReader(QThread):
                         self.header_received.emit(payload)
                     elif kind == "data":
                         self.data_received.emit(payload)
+                    elif kind == "sd":
+                        self.sd_status_received.emit(payload)
                     elif kind == "message":
                         self.message_received.emit(payload)
                     elif kind == "need_header" and time.monotonic() - last_header_request > 1:

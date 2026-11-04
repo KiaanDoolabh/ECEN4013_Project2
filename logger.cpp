@@ -46,7 +46,8 @@ SdLogger::Event SdLogger::update() {
         stop();
         return Event::Removed;
     }
-    if (!open_ && card_in && time_reached(retry_at_)) {
+    // While recording is switched on, a card going in (again) gets a new file
+    if (recording_ && !open_ && card_in && time_reached(retry_at_)) {
         if (start()) {
             failure_reported_ = false;
             return Event::Started;
@@ -59,6 +60,21 @@ SdLogger::Event SdLogger::update() {
         }
     }
     return Event::None;
+}
+
+void SdLogger::start_recording() {
+    recording_ = true;
+    failure_reported_ = false;
+    retry_at_ = get_absolute_time();
+}
+
+void SdLogger::stop_recording() {
+    recording_ = false;
+    if (open_) stop();
+}
+
+uint64_t SdLogger::size() {
+    return open_ ? f_size(&file_) : 0;
 }
 
 bool SdLogger::card_present() {

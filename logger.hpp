@@ -1,6 +1,7 @@
 // CSV logger on a micro SD card (FatFs over SPI, wiring in hw_config.c).
-// Every boot and every time a card is put back in, it starts a new file:
-// LOG000.CSV, LOG001.CSV, ... picking the next number not already on the card.
+// Nothing is written until start_recording(). Each recording, and each time a card is
+// put back in while recording, starts a new file: LOG000.CSV, LOG001.CSV, ...
+// picking the next number not already on the card.
 #pragma once
 #include <cstdint>
 #include "ff.h"
@@ -12,8 +13,13 @@ public:
 
     explicit SdLogger(const char* header) : header_(header) {}
 
-    // Call often. Notices the card going in or out, and opens a new file when it goes in.
+    // Call often. Notices the card going in or out, and opens a new file when recording.
     Event update();
+
+    // Recording on/off. Stopping closes the file so it's safe to pull the card.
+    void start_recording();
+    void stop_recording();
+    bool recording() const { return recording_; }  // switched on, even if waiting for a card
 
     // Appends one line (should end in '\n'). Saves to the card at most once a second.
     void write(const char* line);
@@ -24,7 +30,9 @@ public:
     bool logging() const { return open_; }
     const char* filename() const { return filename_; }
     uint32_t rows() const { return rows_; }
+    uint64_t size();  // bytes in the current file, 0 if none is open
     const char* error() const { return error_; }
+    bool failed() const { return failure_reported_; }  // card is in but logging couldn't start
 
 private:
     bool start();
@@ -34,6 +42,7 @@ private:
     FATFS fs_;
     FIL file_;
     bool driver_ready_ = false;
+    bool recording_ = false;
     bool open_ = false;
     bool failure_reported_ = false;
     bool lost_by_write_error_ = false;

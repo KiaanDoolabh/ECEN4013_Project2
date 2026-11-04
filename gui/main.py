@@ -26,6 +26,14 @@ QLabel#detail { font-family: Consolas, monospace; font-size: 17px; }
 QLabel#axis { font-weight: 600; color: palette(mid); padding-right: 10px; }
 QLabel#connection { font-weight: 600; }
 QLabel#status { color: palette(mid); }
+QLabel#sd { font-weight: 600; padding: 6px 12px; border-radius: 6px;
+            color: white; background: #6b7280; }
+QLabel#sd[state="recording"] { background: #15803d; }
+QLabel#sd[state="starting"] { background: #b45309; }
+QLabel#sd[state="ready"] { background: #1d4ed8; }
+QLabel#sd[state="waiting_card"], QLabel#sd[state="error"] { background: #b91c1c; }
+QPushButton#record { font-weight: 600; padding: 6px 16px; }
+QPushButton#record[action="stop"] { color: #b91c1c; }
 QLabel#status[warning="true"] { color: #d97706; font-weight: 600; }
 QGroupBox { font-size: 18px; font-weight: 600; border: 1px solid palette(mid);
             border-radius: 8px; margin-top: 14px; padding: 12px; }
@@ -58,6 +66,7 @@ class MainWindow(QMainWindow):
         self.menu_screen.quit_requested.connect(self.close)
         self.display_screen.end_requested.connect(self.end_display)
         self.display_screen.quit_requested.connect(self.close)
+        self.display_screen.record_requested.connect(self.set_recording)
 
         # File > Quit (Ctrl+Q) works from either screen
         quit_action = QAction("Quit", self)
@@ -87,6 +96,7 @@ class MainWindow(QMainWindow):
 
         self.reader = SerialReader(port)
         self.reader.data_received.connect(self.on_data)
+        self.reader.sd_status_received.connect(self.display_screen.update_sd)
         self.reader.message_received.connect(self.on_message)
         self.reader.failed.connect(self.on_failed)
         self.reader.start()
@@ -100,7 +110,8 @@ class MainWindow(QMainWindow):
     def stop_reader(self):
         self.watchdog.stop()
         if self.reader is not None:
-            for signal in (self.reader.data_received, self.reader.message_received, self.reader.failed):
+            for signal in (self.reader.data_received, self.reader.sd_status_received,
+                           self.reader.message_received, self.reader.failed):
                 signal.disconnect()
             self.reader.stop()
             self.reader = None
@@ -109,6 +120,10 @@ class MainWindow(QMainWindow):
         """Graceful failure: explain what went wrong and return to the main menu."""
         self.end_display()
         QMessageBox.warning(self, "No data stream", message)
+
+    def set_recording(self, start):
+        if self.reader is not None:
+            self.reader.send(b"r" if start else b"t")
 
     # ---- incoming data ----
 
