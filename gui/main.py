@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ECEN 4013 Project 2 - Live Display")
-        self.resize(1150, 500)
+        self.resize(1150, 640)
 
         self.reader = None
         self.port = ""
@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self.reader = SerialReader(port)
         self.reader.data_received.connect(self.on_data)
         self.reader.sd_status_received.connect(self.display_screen.update_sd)
+        self.reader.satellites_received.connect(self.display_screen.satellites_tab.update_satellites)
         self.reader.message_received.connect(self.on_message)
         self.reader.failed.connect(self.on_failed)
         self.reader.start()
@@ -111,7 +112,8 @@ class MainWindow(QMainWindow):
         self.watchdog.stop()
         if self.reader is not None:
             for signal in (self.reader.data_received, self.reader.sd_status_received,
-                           self.reader.message_received, self.reader.failed):
+                           self.reader.satellites_received, self.reader.message_received,
+                           self.reader.failed):
                 signal.disconnect()
             self.reader.stop()
             self.reader = None

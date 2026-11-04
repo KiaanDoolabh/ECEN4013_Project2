@@ -32,6 +32,9 @@ constexpr uint32_t LOG_INTERVAL_MS = 250;  // 4 rows a second
 // GUI data stream ("$DATA,<csv row>" lines). Bluetooth runs at 9600 baud, so it gets fewer.
 constexpr uint32_t STREAM_INTERVAL_USB_MS = 100;
 constexpr uint32_t STREAM_INTERVAL_BT_MS = 500;
+// "$SAT,..." satellite list for the GUI's Satellites tab (they move slowly, so not often)
+constexpr uint32_t SAT_INTERVAL_USB_MS = 1000;
+constexpr uint32_t SAT_INTERVAL_BT_MS = 5000;
 
 const char* const CSV_HEADER =
     "uptime_ms,utc_date,utc_time,gps_fix,latitude,longitude,altitude_m,satellites,sats_in_view,hdop,"
@@ -322,6 +325,7 @@ int main() {
     absolute_time_t next_log = get_absolute_time();
     absolute_time_t next_stream = get_absolute_time();
     absolute_time_t next_sd_status = get_absolute_time();
+    absolute_time_t next_sat = get_absolute_time();
 
     while (true) {
         bool pressed = bootsel_pressed();
@@ -474,6 +478,23 @@ int main() {
             next_stream = make_timeout_time_ms(console.stream_link() == Console::Route::Usb
                                                    ? STREAM_INTERVAL_USB_MS
                                                    : STREAM_INTERVAL_BT_MS);
+        }
+
+        // "$SAT,G:12:45:230:38:1,R:70:..." = system:id:elevation:azimuth:signal:used per satellite
+        if (console.streaming() && gps_found && time_reached(next_sat)) {
+            GpsSatellite sats[Pa1010d::MAX_SATELLITES];
+            size_t count = gps.satellites(sats, Pa1010d::MAX_SATELLITES);
+            char line[480];
+            size_t len = snprintf(line, sizeof(line), "$SAT");
+            for (size_t i = 0; i < count && len < sizeof(line) - 32; ++i) {
+                len += snprintf(line + len, sizeof(line) - len, ",%c:%u:%u:%u:%u:%u", sats[i].system,
+                                sats[i].prn, sats[i].elevation, sats[i].azimuth, sats[i].snr,
+                                sats[i].used ? 1 : 0);
+            }
+            console.print_data("%s\n", line);
+            next_sat = make_timeout_time_ms(console.stream_link() == Console::Route::Usb
+                                                ? SAT_INTERVAL_USB_MS
+                                                : SAT_INTERVAL_BT_MS);
         }
 
         sleep_ms(20);  // also debounces the button

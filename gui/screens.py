@@ -1,11 +1,28 @@
 """The GUI's two screens: the main menu and the live data display."""
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QGroupBox, QHBoxLayout,
-                               QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                               QLabel, QPushButton, QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
+from map_view import MapTab
+from orientation_view import OrientationTab
+from satellites_view import SatellitesTab
 from serial_link import list_ports
 
 ACCURACY_NAMES = {"0": "Unreliable", "1": "Low", "2": "Medium", "3": "High"}
+
+LOCAL_TIMEZONE = ZoneInfo("America/Chicago")  # US Central; handles CST/CDT automatically
+
+
+def central_time(utc_date, utc_time):
+    """GPS UTC date/time strings -> '2026-11-03 08:22:05 CST'; blank if not available."""
+    try:
+        utc = datetime.strptime(f"{utc_date} {utc_time}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    return utc.astimezone(LOCAL_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 # SD states where recording is switched on (the button offers Stop)
 RECORDING_STATES = {"recording", "starting", "waiting_card", "error"}
@@ -149,16 +166,27 @@ class DisplayScreen(QWidget):
         top.addWidget(end)
         top.addWidget(quit_button)
 
-        sections = QHBoxLayout()
+        live = QWidget()
+        sections = QHBoxLayout(live)
+        sections.setContentsMargins(0, 0, 0, 0)
         sections.addWidget(self._build_gps(), 1)
         sections.addWidget(self._build_imu(), 2)
+
+        self.orientation_tab = OrientationTab()
+        self.tabs = QTabWidget()
+        self.tabs.addTab(live, "Live Data")
+        self.tabs.addTab(self.orientation_tab, "3D Orientation")
+        self.satellites_tab = SatellitesTab()
+        self.tabs.addTab(self.satellites_tab, "Satellites")
+        self.map_tab = MapTab()
+        self.tabs.addTab(self.map_tab, "Map")
 
         self.status = QLabel("Waiting for data...")
         self.status.setObjectName("status")
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
-        layout.addLayout(sections, 1)
+        layout.addWidget(self.tabs, 1)
         layout.addWidget(self.status)
 
     def _value(self, column, decimals):
@@ -182,7 +210,7 @@ class DisplayScreen(QWidget):
         self.satellites = QLabel("—")
         self.utc = QLabel("—")
         for name, label in (("Fix", self.fix), ("Satellites (used / seen)", self.satellites),
-                            ("UTC time", self.utc)):
+                            ("Time (Central)", self.utc)):
             label.setObjectName("detail")
             grid.addWidget(QLabel(name), row, 0)
             grid.addWidget(label, row, 1, 1, 2, Qt.AlignRight)
@@ -246,6 +274,9 @@ class DisplayScreen(QWidget):
             label.setText("—")
         for label in (self.fix, self.satellites, self.utc, self.accuracy):
             label.setText("—")
+        self.orientation_tab.reset()
+        self.satellites_tab.reset()
+        self.map_tab.reset()
 
     def update_data(self, row):
         for column, (label, decimals) in self.values.items():
@@ -254,10 +285,16 @@ class DisplayScreen(QWidget):
         self.fix.setText({"1": "Yes", "0": "Searching"}.get(row.get("gps_fix", ""), "No GPS"))
         used, seen = row.get("satellites", ""), row.get("sats_in_view", "")
         self.satellites.setText(f"{used or '0'} / {seen or '0'}" if (used or seen) else "—")
-        date, time = row.get("utc_date", ""), row.get("utc_time", "")
-        self.utc.setText(f"{date} {time}".strip() or "—")
+        self.utc.setText(central_time(row.get("utc_date", ""), row.get("utc_time", "")) or "—")
 
         self.accuracy.setText(ACCURACY_NAMES.get(row.get("heading_accuracy", ""), "—"))
+        self.orientation_tab.update_data(row)
+        self.map_tab.update_data(row)
+        if row.get("gps_fix") == "1":
+            try:
+                self.satellites_tab.set_receiver(float(row["latitude"]), float(row["longitude"]))
+            except (KeyError, ValueError):
+                pass
 
     def update_sd(self, sd):
         """Shows the SD card state from a $SD line as a colored badge, and sets the record button."""

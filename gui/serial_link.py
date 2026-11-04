@@ -6,6 +6,9 @@ Sending 'g' asks the firmware for its GUI data stream:
     $SD,recording,12345,LOG004.CSV      SD card state, file size in bytes, and the file name or
                                         error message. States: recording, starting, waiting_card,
                                         error, ready, no_card
+    $SAT,G:12:45:230:38:1,R:70:...      satellites in view, each system:id:elevation:azimuth:
+                                        signal(dB-Hz):used (G GPS, R GLONASS, E Galileo,
+                                        C BeiDou, J QZSS)
 Any other line (">> SD card: ...", status text) is passed along as a message.
 Sending 'x' stops the stream; 'r' / 't' start and stop recording to the SD card.
 """
@@ -33,7 +36,7 @@ def list_ports():
 
 
 class StreamParser:
-    """Turns raw bytes from the Pico into ("header" | "data" | "sd" | "message", payload) events.
+    """Turns raw bytes from the Pico into ("header" | "data" | "sd" | "sats" | "message", payload) events.
 
     Kept separate from the serial port so it can be tested without hardware.
     """
@@ -69,6 +72,15 @@ class StreamParser:
                 state, size, detail = parts
                 return ("sd", {"state": state, "size": int(size) if size.isdigit() else 0,
                                "detail": detail})
+        if line == "$SAT" or line.startswith("$SAT,"):
+            sats = []
+            for item in line.split(",")[1:]:
+                parts = item.split(":")
+                if len(parts) == 6 and all(p.isdigit() for p in parts[1:]):
+                    system, prn, elevation, azimuth, snr, used = parts
+                    sats.append({"system": system, "prn": int(prn), "elevation": int(elevation),
+                                 "azimuth": int(azimuth), "snr": int(snr), "used": used == "1"})
+            return ("sats", sats)
         return ("message", line)
 
 
@@ -78,6 +90,7 @@ class SerialReader(QThread):
     header_received = Signal(list)
     data_received = Signal(dict)      # column name -> value string ("" if not available)
     sd_status_received = Signal(dict) # {"state": ..., "size": bytes, "detail": file name or error}
+    satellites_received = Signal(list) # [{"system", "prn", "elevation", "azimuth", "snr", "used"}]
     message_received = Signal(str)
     failed = Signal(str)              # couldn't open the port, or the device went away
 
@@ -117,6 +130,8 @@ class SerialReader(QThread):
                         self.data_received.emit(payload)
                     elif kind == "sd":
                         self.sd_status_received.emit(payload)
+                    elif kind == "sats":
+                        self.satellites_received.emit(payload)
                     elif kind == "message":
                         self.message_received.emit(payload)
                     elif kind == "need_header" and time.monotonic() - last_header_request > 1:
